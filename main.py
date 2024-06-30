@@ -34,10 +34,7 @@ def get_repo_statistics(owner: AnyStr, repo: AnyStr):
 def github_repo_public_events(owner, repo, last_modified=None):
     owner = owner
     repo = repo
-    if last_modified:
-        headers = {'if-modified-since': last_modified}
-    else:
-        headers = None
+    headers = {'if-modified-since': last_modified} if last_modified else None
     callback_url = f"https://api.github.com/repos/{owner}/{repo}/events"
     response = httpx.get(callback_url, headers=headers)
 
