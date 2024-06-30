@@ -5,6 +5,7 @@ import httpx
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 import uvicorn
+from pathlib import Path
 from initiate_dbs import create_sqlite_database
 from data_manipulation import data_magic, update_repo_combo, add_repo_combo, \
     check_repo_combo, get_last_modified, write_github_events
@@ -75,4 +76,5 @@ def extract_from_response(github_response, repo, owner):
 
 if __name__ == "__main__":
     create_sqlite_database("my.db")
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # https://github.com/tiangolo/fastapi/issues/1495
+    uvicorn.run(f"{Path(__file__).stem}:app", host="127.0.0.1", port=8000, reload=True, log_level="debug")
