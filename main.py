@@ -1,5 +1,6 @@
 # https://www.reddit.com/r/learnpython/comments/x10ezo/fastapi_how_do_i_cross_call_another_endpoint/
 from typing import Union, AnyStr
+from tools import setup_logger
 import httpx
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
@@ -8,6 +9,7 @@ from initiate_dbs import create_sqlite_database
 from data_manipulation import data_magic, update_repo_combo, add_repo_combo, \
     check_repo_combo, get_last_modified, write_github_events
 
+logger = setup_logger(__name__)
 
 app = FastAPI()
 github_callback_router = APIRouter()
@@ -47,17 +49,17 @@ def process_github_response(response, repo, owner, repo_combo_in_db):
     response_headers = response.headers
 
     if status_code == 304:
-        print("status_code == 304")
+        logger.debug(f"status code = {status_code}, repo_combo_in_db = {repo_combo_in_db}")
         return data_magic(repo, owner)
 
     elif status_code == 200 and repo_combo_in_db:
-        print("status_code == 200 and repo_combo_in_db")
+        logger.debug(f"status code = {status_code}, repo_combo_in_db = {repo_combo_in_db}")
         last_modified = response_headers.get('last-modified')
         update_repo_combo(repo, owner, last_modified)
         return data_magic(repo, owner)
 
     elif status_code == 200 and not repo_combo_in_db:
-        print("status_code == 200 and not repo_combo_in_db")
+        logger.debug(f"status code = {status_code}, repo_combo_in_db = {repo_combo_in_db}")
         last_modified = response_headers.get('last-modified')
         add_repo_combo(repo, owner, last_modified)
         events = extract_from_response(response.json(), repo, owner)
