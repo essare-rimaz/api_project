@@ -1,4 +1,7 @@
 import sqlite3
+from tools import setup_logger
+
+logger = setup_logger(__name__)
 
 
 def check_state(repo, owner):
@@ -9,6 +12,7 @@ def check_state(repo, owner):
         cur.execute(sql, variables)
         row = cur.fetchone()
         conn.close()
+    logger.debug(row)
     return row
 
 
@@ -20,9 +24,11 @@ def get_last_modified(repo, owner):
         cur.execute(sql, variables)
         row = cur.fetchone()
     if row is None:
+        logger.debug(row)
         conn.close()
         return row
     else:
+        logger.debug(row)
         conn.close()
         return row[0]
 
