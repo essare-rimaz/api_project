@@ -1,68 +1,118 @@
 # https://www.reddit.com/r/learnpython/comments/x10ezo/fastapi_how_do_i_cross_call_another_endpoint/
-from typing import Union, AnyStr
 from tools import setup_logger
 import httpx
-from fastapi import APIRouter, FastAPI
-from pydantic import BaseModel
+from fastapi import APIRouter, FastAPI, Depends
+from schemas import RepoIdentity
+from sqlmodel import Session, select
 import uvicorn
 from pathlib import Path
-from initiate_dbs import create_sqlite_database
-from data_manipulation import data_magic, update_repo_combo, add_repo_combo, \
-    check_repo_combo, get_last_modified, write_github_events
+from models import Repository, GithubEvent
+from initiate_db import init_db, get_session
+from contextlib import asynccontextmanager
 
 logger = setup_logger(__name__)
 
-app = FastAPI()
+
+# creates an object that is initiated before the app starts
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+app = FastAPI(lifespan=lifespan)
 github_callback_router = APIRouter()
 
 
+#TODO actually only returns 30 items, have to implement pagination
+@github_callback_router.get("https://api.github.com/repos/{$request.body.owner}/{$request.body.repo}/events")
+def github_repo_public_events(repo, owner, last_modified):
+    """
+    Pooling from GitHub API. In order to keep calls at minimum header "last_modified" is used
+    for potential 304 code response.
+    """
+    headers = {'if-modified-since': last_modified} if last_modified else None
+    logger.debug(f"my header {headers}")
+    callback_url = f"https://api.github.com/repos/{owner}/{repo}/events"
+    response = httpx.get(callback_url, headers=headers)
+    logger.debug(response.status_code)
+    logger.debug(response.headers.get("Last-Modified"))
+    return response
+
+
 @app.get("/", callbacks=github_callback_router.routes)
-def get_repo_statistics(owner: AnyStr, repo: AnyStr):
+def get_repo_statistics(repo_identity: RepoIdentity, session: Session = Depends(get_session)):
     """
     Get average time (in seconds) between consecutive events (grouped by event type) for given GitHub repository.
 
     Is returned as a list of lists.
     """
-    repo_combo_in_db = check_repo_combo(repo, owner)
-    last_modified = get_last_modified(repo, owner)
-    response = github_repo_public_events(owner, repo, last_modified)
+    repo = session.get(Repository, (repo_identity.repo, repo_identity.owner))
+    # handle whether the repository already was called in the past
+    if repo:
+        logger.debug(f"repo exists")
+        logger.debug(f"at start repo has {repo.last_modified} as last modified")
+        last_modified = repo.last_modified
+    else:
+        logger.debug(f"repo DOES NOT exist")
 
-    return process_github_response(response, repo, owner, repo_combo_in_db)
+        repo_data = Repository(name=repo_identity.repo, owner=repo_identity.owner)
+        session.add(repo_data)
+        session.flush()
+        last_modified = None
+
+    repo = repo_identity.repo
+    owner = repo_identity.owner
+
+    response = github_repo_public_events(repo, owner, last_modified)
+    process_github_response(response, repo, owner, session)
+
+    statement = select(GithubEvent).where(GithubEvent.repo_name_fk == repo and GithubEvent.repo_owner_fk == owner)
+    results = session.exec(statement)
+    result = results.all()
+    logger.debug(f"{len(result)}")
+    return result
 
 
-@github_callback_router.get(
-"https://api.github.com/repos/{$owner}/{$repo}/events")
-def github_repo_public_events(owner, repo, last_modified=None):
-    owner = owner
-    repo = repo
-    headers = {'if-modified-since': last_modified} if last_modified else None
-    callback_url = f"https://api.github.com/repos/{owner}/{repo}/events"
-    response = httpx.get(callback_url, headers=headers)
-
-    return response
-
-
-def process_github_response(response, repo, owner, repo_combo_in_db):
+# is it ok that the session is not used as a dependent?
+def process_github_response(response, repo, owner, session):
     status_code = response.status_code
     response_headers = response.headers
-
+    last_modified = response_headers.get('Last-Modified')
+    logger.debug(f"status code = {status_code}")
     if status_code == 304:
-        logger.debug(f"status code = {status_code}, repo_combo_in_db = {repo_combo_in_db}")
-        return data_magic(repo, owner)
+        statement = select(Repository).where(Repository.name == repo and Repository.owner == owner)
+        result = session.exec(statement)
+        repository = result.one()
+        repository.last_modified = last_modified
 
-    elif status_code == 200 and repo_combo_in_db:
-        logger.debug(f"status code = {status_code}, repo_combo_in_db = {repo_combo_in_db}")
-        last_modified = response_headers.get('last-modified')
-        update_repo_combo(repo, owner, last_modified)
-        return data_magic(repo, owner)
+    elif status_code == 200:
+        last_modified = response_headers.get('Last-Modified')
+        statement = select(Repository).where(Repository.name == repo and Repository.owner == owner)
+        result = session.exec(statement)
+        repository = result.one()
+        logger.debug(repository)
 
-    elif status_code == 200 and not repo_combo_in_db:
-        logger.debug(f"status code = {status_code}, repo_combo_in_db = {repo_combo_in_db}")
-        last_modified = response_headers.get('last-modified')
-        add_repo_combo(repo, owner, last_modified)
+        repository.last_modified = last_modified
+        session.add(repository)
+        session.flush()
+        session.refresh(repository)
+        logger.debug(repository)
+
         events = extract_from_response(response.json(), repo, owner)
-        write_github_events(events)
-        return data_magic(repo, owner)
+        #TODO implement a check for each row if it already is in DB until I learn how to do it in bulk...
+        # I would definetly prefer if it wasnt taken by index...
+        # it does seem that upsert exists in sqlmodel, best solution so far looks like
+        # https://github.com/tiangolo/sqlmodel/issues/59#issuecomment-2085514089
+        for event in events:
+            github_event = GithubEvent(id=event[0],
+                                       type=event[1],
+                                       created_at=event[2],
+                                       repo_name_fk=event[3],
+                                       repo_owner_fk=event[4])
+            session.add(github_event)
+        #TODO rollback in case of errors
+        session.commit()
+
     else:
         print(status_code)
         raise ValueError
@@ -75,6 +125,5 @@ def extract_from_response(github_response, repo, owner):
 
 
 if __name__ == "__main__":
-    create_sqlite_database("my.db")
     # https://github.com/tiangolo/fastapi/issues/1495
     uvicorn.run(f"{Path(__file__).stem}:app", host="127.0.0.1", port=8000, reload=True, log_level="debug")
